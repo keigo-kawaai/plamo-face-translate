@@ -56,6 +56,7 @@
     <option value="onnx-community/whisper-base" selected>音声 base (77MB)</option>
     <option value="onnx-community/whisper-small">音声 small (249MB)</option>
   </select>
+  <label title="話している途中の認識結果も表示する（処理が重くなります）"><input type="checkbox" id="interimOn"> 途中表示</label>
   <button id="load">読み込む</button>
 </header>
 <div id="bar"></div>
@@ -142,6 +143,8 @@ $('swap').onclick = () => { [$('from').value, $('to').value] = [$('to').value, $
 // iPhone では既定で CPU、PC では GPU を初期値にする
 const isPhone = /iPhone|iPad|Android/.test(navigator.userAgent);
 $('gpu').value = !isPhone && navigator.gpu ? '99' : '0';
+// 途中表示は処理が重いので、スマートフォンでは既定で切る
+$('interimOn').checked = !isPhone;
 
 let wllama = null;
 
@@ -436,7 +439,9 @@ function endSegment(L) {
 
 // 話している途中の仮の認識（手が空いているときだけ）
 function maybeInterim(L) {
-  if (L.asrBusy || L.finals.length) return;
+  if (!$('interimOn').checked) return;
+  // 翻訳が動いている間は、翻訳を優先して途中表示は休む
+  if (L.asrBusy || L.finals.length || L.mtBusy || L.mtQueue.length) return;
   if (L.segMs < 1200 || performance.now() - L.lastInterim < INTERIM_EVERY_MS) return;
   L.lastInterim = performance.now();
   const segId = L.segId;
