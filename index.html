@@ -18,6 +18,8 @@
   .pane.them { transform: rotate(180deg); border-top: 1px solid var(--line); }
   .pane:empty::before { content: attr(data-placeholder); color: #aaa; }
   .pane.busy { color: var(--muted); }
+  .pane div { margin-bottom: 6px; }
+  .pane .interim, .pane .pending { color: #aaa; }
   #status { padding: 3px 12px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); min-height: 20px; }
   #bar { height: 3px; background: var(--green); width: 0; transition: width .2s; }
   #logbox { font-size: 11px; color: var(--muted); padding: 0 12px; }
@@ -221,6 +223,31 @@ function buildPrompt(text, from, to) {
     + `<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>${to}<|plamo:msg|>`;
 }
 
+// 翻訳の中核。訳文が伸びるたびに onText を呼び、最後に所要時間の説明を返す。
+async function runTranslation(text, from, to, onText) {
+  const t0 = performance.now();
+  let first = 0;
+  let acc = '';
+  let last = null;
+  await wllama.createCompletion({
+    prompt: buildPrompt(text, from, to),
+    max_tokens: 512,
+    temperature: 0,
+    stop: ['<|plamo:tag|>', '<|plamo:bos|>'],
+    stream: true,
+    onData: (chunk) => {
+      if (!first) first = performance.now();
+      acc += chunk.choices?.[0]?.text ?? '';
+      onText(acc);
+      last = chunk;
+    },
+  });
+  const total = (performance.now() - t0) / 1000;
+  const ttft = first ? (first - t0) / 1000 : total;
+  const tps = last?.timings?.predicted_per_second;
+  return `翻訳 ${total.toFixed(1)}秒（最初の文字まで ${ttft.toFixed(1)}秒${tps ? `、${tps.toFixed(1)} トークン/秒` : ''}）`;
+}
+
 // 翻訳して表示する。speaker='me' なら原文を下（自分向き）、訳を上（相手向き）に出す。
 // speaker='them' ならその逆。
 async function translate(text, from, to, speaker) {
@@ -231,28 +258,8 @@ async function translate(text, from, to, speaker) {
   srcPane.textContent = text;
   outPane.textContent = '';
   outPane.classList.add('busy');
-  const t0 = performance.now();
-  let first = 0;
-  let acc = '';
-  let last = null;
   try {
-    await wllama.createCompletion({
-      prompt: buildPrompt(text, from, to),
-      max_tokens: 512,
-      temperature: 0,
-      stop: ['<|plamo:tag|>', '<|plamo:bos|>'],
-      stream: true,
-      onData: (chunk) => {
-        if (!first) first = performance.now();
-        acc += chunk.choices?.[0]?.text ?? '';
-        outPane.textContent = acc;
-        last = chunk;
-      },
-    });
-    const total = (performance.now() - t0) / 1000;
-    const ttft = first ? (first - t0) / 1000 : total;
-    const tps = last?.timings?.predicted_per_second;
-    return `翻訳 ${total.toFixed(1)}秒（最初の文字まで ${ttft.toFixed(1)}秒${tps ? `、${tps.toFixed(1)} トークン/秒` : ''}）`;
+    return await runTranslation(text, from, to, (t) => { outPane.textContent = t; });
   } catch (e) {
     logLine('ERROR', [e]);
     return `翻訳失敗: ${e?.message || e}`;
@@ -316,52 +323,255 @@ async function decodeTo16k(arrayBuffer) {
   }
 }
 
-let rec = null; // 録音中の状態
+// ---------- 聞き取りながら翻訳する ----------
+// 無音で文を区切り、区切れた文から順に 認識 → 翻訳 して追記していく。
+// 話している最中は、認識途中の文字を薄い色で出す。
+const SILENCE_MS = 700;      // これだけ無音が続いたら文の終わりとみなす
+const MAX_SEGMENT_MS = 15000; // 区切りが無くても、この長さで一度確定する
+const MIN_SPEECH_MS = 300;   // これより短い音は雑音として捨てる
+const PREROLL_MS = 300;      // 話し始めの頭が欠けないよう、直前の音も含める
+const INTERIM_EVERY_MS = 1000;
+
+let live = null; // 聞き取り中の状態
+
+function resampleTo16k(data, rate) {
+  if (rate === 16000) return data;
+  const n = Math.floor(data.length * 16000 / rate);
+  const out = new Float32Array(n);
+  const step = rate / 16000;
+  for (let i = 0; i < n; i++) {
+    const x = i * step;
+    const j = Math.floor(x);
+    const a = data[j];
+    const b = data[Math.min(j + 1, data.length - 1)];
+    out[i] = a + (b - a) * (x - j);
+  }
+  return out;
+}
+
+function concat(chunks) {
+  let len = 0;
+  for (const c of chunks) len += c.length;
+  const out = new Float32Array(len);
+  let o = 0;
+  for (const c of chunks) { out.set(c, o); o += c.length; }
+  return out;
+}
+
+function newLive(speaker, rate) {
+  const from = speaker === 'me' ? $('from').value : $('to').value;
+  const to = speaker === 'me' ? $('to').value : $('from').value;
+  const srcPane = speaker === 'me' ? $('src') : $('out');
+  const outPane = speaker === 'me' ? $('out') : $('src');
+  srcPane.textContent = '';
+  outPane.textContent = '';
+  const interim = document.createElement('div');
+  interim.className = 'interim';
+  srcPane.append(interim);
+  return {
+    speaker, rate, from, to, srcPane, outPane, interim,
+    stopped: false,
+    // 区切り検出
+    inSpeech: false, chunks: [], pre: [], preMs: 0, loudMs: 0, silenceMs: 0, segMs: 0, voicedMs: 0,
+    noise: 0.004, segId: 0, lastInterim: 0,
+    // 処理待ち
+    finals: [], asrBusy: false, mtQueue: [], mtBusy: false, lastMsg: '',
+  };
+}
+
+// マイクから届いた波形を 1 かたまりずつ受け取る
+function feed(L, chunk) {
+  if (L.stopped) return;
+  const dt = chunk.length / L.rate * 1000;
+  let sum = 0;
+  for (let i = 0; i < chunk.length; i++) sum += chunk[i] * chunk[i];
+  const rms = Math.sqrt(sum / chunk.length);
+  const loud = rms > Math.max(0.012, L.noise * 3);
+
+  if (!L.inSpeech) {
+    L.noise = Math.min(0.05, L.noise * 0.97 + rms * 0.03);
+    L.pre.push(chunk);
+    L.preMs += dt;
+    while (L.preMs > PREROLL_MS && L.pre.length > 1) L.preMs -= L.pre.shift().length / L.rate * 1000;
+    L.loudMs = loud ? L.loudMs + dt : 0;
+    if (L.loudMs >= 60) {
+      L.inSpeech = true;
+      L.chunks = L.pre;
+      L.pre = [];
+      L.segMs = L.preMs;
+      L.preMs = 0;
+      L.voicedMs = L.loudMs;
+      L.silenceMs = 0;
+      L.loudMs = 0;
+      L.lastInterim = performance.now();
+    }
+    return;
+  }
+
+  L.chunks.push(chunk);
+  L.segMs += dt;
+  if (loud) { L.silenceMs = 0; L.voicedMs += dt; } else L.silenceMs += dt;
+  if (L.silenceMs >= SILENCE_MS || L.segMs >= MAX_SEGMENT_MS) endSegment(L);
+  else maybeInterim(L);
+}
+
+// 文の区切り。確定用の認識待ちに積む
+function endSegment(L) {
+  if (!L.inSpeech) return;
+  const audio = L.voicedMs >= MIN_SPEECH_MS ? resampleTo16k(concat(L.chunks), L.rate) : null;
+  L.inSpeech = false;
+  L.chunks = [];
+  L.segId++;
+  L.interim.textContent = '';
+  if (audio) {
+    const row = document.createElement('div');
+    row.className = 'pending';
+    row.textContent = '…';
+    L.srcPane.insertBefore(row, L.interim);
+    L.finals.push({ audio, row });
+    pumpAsr(L);
+  }
+  liveStatus(L);
+}
+
+// 話している途中の仮の認識（手が空いているときだけ）
+function maybeInterim(L) {
+  if (L.asrBusy || L.finals.length) return;
+  if (L.segMs < 1200 || performance.now() - L.lastInterim < INTERIM_EVERY_MS) return;
+  L.lastInterim = performance.now();
+  const segId = L.segId;
+  const audio = resampleTo16k(concat(L.chunks), L.rate);
+  L.asrBusy = true;
+  transcribe(audio, L.from)
+    .then((text) => {
+      if (L.inSpeech && L.segId === segId) {
+        L.interim.textContent = cleanAsr(text);
+        scrollEnd(L.srcPane);
+      }
+    })
+    .catch((e) => logLine('ERROR', [e]))
+    .finally(() => { L.asrBusy = false; pumpAsr(L); });
+}
+
+// 音が無いところで Whisper が出しがちな注記（[音楽] など）を取り除く
+function cleanAsr(text) {
+  return (text || '').replace(/[\[(（【][^\])）】]*[\])）】]/g, '').trim();
+}
+
+async function pumpAsr(L) {
+  if (L.asrBusy || !L.finals.length) return;
+  L.asrBusy = true;
+  const { audio, row } = L.finals.shift();
+  try {
+    const t0 = performance.now();
+    const text = cleanAsr(await transcribe(audio, L.from));
+    L.lastMsg = `認識 ${((performance.now() - t0) / 1000).toFixed(1)}秒`;
+    if (!text) {
+      row.remove();
+    } else {
+      row.className = '';
+      row.textContent = text;
+      const outRow = document.createElement('div');
+      outRow.className = 'pending';
+      outRow.textContent = '…';
+      L.outPane.append(outRow);
+      scrollEnd(L.srcPane);
+      scrollEnd(L.outPane);
+      L.mtQueue.push({ text, outRow });
+      pumpMt(L);
+    }
+  } catch (e) {
+    logLine('ERROR', [e]);
+    row.remove();
+  } finally {
+    L.asrBusy = false;
+    liveStatus(L);
+    pumpAsr(L);
+  }
+}
+
+async function pumpMt(L) {
+  if (L.mtBusy || !L.mtQueue.length) return;
+  L.mtBusy = true;
+  const { text, outRow } = L.mtQueue.shift();
+  try {
+    const msg = await runTranslation(text, L.from, L.to, (t) => {
+      outRow.className = '';
+      outRow.textContent = t;
+      scrollEnd(L.outPane);
+    });
+    L.lastMsg = `${L.lastMsg.split(' / ')[0]} / ${msg}`;
+  } catch (e) {
+    logLine('ERROR', [e]);
+    outRow.textContent = '（翻訳失敗）';
+  } finally {
+    L.mtBusy = false;
+    liveStatus(L);
+    pumpMt(L);
+  }
+}
+
+function scrollEnd(pane) { pane.scrollTop = pane.scrollHeight; }
+
+function liveStatus(L) {
+  const waiting = L.finals.length + (L.asrBusy ? 1 : 0);
+  const mt = L.mtQueue.length + (L.mtBusy ? 1 : 0);
+  const head = L.stopped
+    ? (waiting || mt ? '停止。残りを処理中…' : '停止')
+    : '聞き取り中… もう一度押すと止まります';
+  status(`${head}${waiting || mt ? `（認識待ち ${waiting} / 翻訳待ち ${mt}）` : ''}${L.lastMsg ? ` ｜ ${L.lastMsg}` : ''}`);
+  if (L.stopped && !waiting && !mt && live === L) { live = null; setMics(true); }
+}
 
 async function toggleMic(speaker) {
   const btn = speaker === 'me' ? $('micMe') : $('micThem');
-  if (rec) {
-    if (rec.speaker === speaker) rec.recorder.stop();
+  if (live) {
+    if (live.speaker === speaker && !live.stopped) stopLive();
     return;
   }
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+    });
   } catch (e) {
     status(`マイクを使えません: ${e?.message || e}`);
     return;
   }
-  const chunks = [];
-  const recorder = new MediaRecorder(stream);
-  rec = { speaker, recorder };
-  btn.classList.add('rec');
-  status('録音中… もう一度押すと止まります');
-  recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-  recorder.onstop = async () => {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    await ctx.audioWorklet.addModule('./pcm-worklet.js');
+    const L = newLive(speaker, ctx.sampleRate);
+    const node = new AudioWorkletNode(ctx, 'pcm');
+    node.port.onmessage = ({ data }) => feed(L, data);
+    const mute = ctx.createGain();
+    mute.gain.value = 0; // 処理を動かすために出力へつなぐが、音は出さない
+    ctx.createMediaStreamSource(stream).connect(node).connect(mute).connect(ctx.destination);
+    L.stream = stream;
+    L.ctx = ctx;
+    L.btn = btn;
+    live = L;
+    btn.classList.add('rec');
+    (speaker === 'me' ? $('micThem') : $('micMe')).disabled = true;
+    liveStatus(L);
+  } catch (e) {
     stream.getTracks().forEach((t) => t.stop());
-    btn.classList.remove('rec');
-    rec = null;
-    setMics(false);
-    try {
-      const t0 = performance.now();
-      status('音声を認識中…');
-      const blob = new Blob(chunks, { type: recorder.mimeType });
-      const audio = await decodeTo16k(await blob.arrayBuffer());
-      const from = speaker === 'me' ? $('from').value : $('to').value;
-      const to = speaker === 'me' ? $('to').value : $('from').value;
-      const text = await transcribe(audio, from);
-      const asrSec = ((performance.now() - t0) / 1000).toFixed(1);
-      if (!text) { status(`音声を認識できませんでした（${asrSec}秒）`); return; }
-      const msg = await translate(text, from, to, speaker);
-      status(`認識 ${asrSec}秒（音声 ${(audio.length / 16000).toFixed(1)}秒） / ${msg}`);
-    } catch (e) {
-      logLine('ERROR', [e]);
-      status(`音声認識失敗: ${e?.message || e}`);
-    } finally {
-      setMics(true);
-    }
-  };
-  recorder.start();
+    logLine('ERROR', [e]);
+    status(`録音を開始できません: ${e?.message || e}`);
+  }
+}
+
+function stopLive() {
+  const L = live;
+  if (!L || L.stopped) return;
+  endSegment(L); // 話の途中で止めた分も確定する
+  L.stopped = true;
+  L.stream?.getTracks().forEach((t) => t.stop());
+  L.ctx?.close();
+  L.btn?.classList.remove('rec');
+  $('micMe').disabled = true;
+  $('micThem').disabled = true;
+  liveStatus(L);
 }
 
 function setMics(enabled) {
@@ -371,6 +581,21 @@ function setMics(enabled) {
 }
 $('micMe').onclick = () => toggleMic('me');
 $('micThem').onclick = () => toggleMic('them');
+
+// 動作確認用: 音声ファイルを実際の速さで流し込み、聞き取り〜翻訳の流れ全体を試す
+window.__liveTest = async (url, speaker = 'me') => {
+  const audio = await decodeTo16k(await (await fetch(url)).arrayBuffer());
+  const L = newLive(speaker, 16000);
+  live = L;
+  const STEP = 1600; // 0.1 秒ぶん
+  for (let i = 0; i < audio.length; i += STEP) {
+    feed(L, audio.subarray(i, i + STEP));
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  stopLive();
+  while (live === L) await new Promise((r) => setTimeout(r, 200));
+  return { src: L.srcPane.innerText, out: L.outPane.innerText, status: $('status').textContent };
+};
 
 // 動作確認用: 音声ファイルの URL を渡して認識だけ試す
 window.__asrTest = async (url, lang) => {
