@@ -20,6 +20,8 @@
   .pane.busy { color: var(--muted); }
   #status { padding: 3px 12px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); min-height: 20px; }
   #bar { height: 3px; background: var(--green); width: 0; transition: width .2s; }
+  #logbox { font-size: 11px; color: var(--muted); padding: 0 12px; }
+  #log { max-height: 30vh; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 4px 0; font-size: 10px; }
   form { display: flex; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--line); }
   textarea { flex: 1; font: inherit; font-size: 17px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; resize: none; height: 46px; }
   form button { border: 0; background: var(--green); color: #fff; font-size: 16px; padding: 0 16px; border-radius: 10px; }
@@ -51,6 +53,8 @@
 
 <div id="status">モデル未読み込み。「読み込む」を押してください（初回のみ通信が必要です）。</div>
 
+<details id="logbox"><summary>ログ</summary><pre id="log"></pre></details>
+
 <form id="form">
   <textarea id="text" placeholder="翻訳するテキストを入力" enterkeyhint="send"></textarea>
   <button id="go" disabled>翻訳</button>
@@ -62,7 +66,11 @@
 </div>
 
 <script type="module">
-import { Wllama } from './vendor/wllama/index.js';
+// 動作確認用: URL に ?compat=1 を付けると、PC でも Safari 向けの互換ビルドで動かす
+if (new URLSearchParams(location.search).has('compat')) {
+  try { delete WebAssembly.Suspending; } catch {}
+}
+const { Wllama } = await import('./vendor/wllama/index.js');
 
 // Service Worker を登録する（マルチスレッド有効化とオフライン起動のため）。
 // 初回は登録後に一度だけ再読み込みして、有効な状態で開き直す。
@@ -85,6 +93,24 @@ const LANGS = [
 const $ = (id) => document.getElementById(id);
 const status = (s) => { $('status').textContent = s; };
 
+// 画面上のログ（iPhone では開発者ツールが使えないため）
+const logLine = (level, args) => {
+  const t = args.map((a) => (a instanceof Error ? `${a.name}: ${a.message}` : typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+  $('log').textContent += `[${new Date().toLocaleTimeString()}] ${level} ${t.slice(0, 300)}
+`;
+  $('log').scrollTop = $('log').scrollHeight;
+};
+const logger = {
+  debug: (...a) => logLine('debug', a),
+  log: (...a) => logLine('log', a),
+  warn: (...a) => logLine('WARN', a),
+  error: (...a) => logLine('ERROR', a),
+};
+addEventListener('error', (e) => logLine('ERROR', [e.message]));
+addEventListener('unhandledrejection', (e) => logLine('ERROR', [e.reason]));
+logLine('log', [`UA: ${navigator.userAgent}`]);
+logLine('log', [`isolated=${self.crossOriginIsolated} webgpu=${!!navigator.gpu} jspi=${!!WebAssembly.Suspending} cores=${navigator.hardwareConcurrency} mem=${navigator.deviceMemory ?? '?'}GB`]);
+
 for (const sel of [$('from'), $('to')]) {
   for (const [code, name] of LANGS) sel.add(new Option(name, code));
 }
@@ -102,12 +128,22 @@ $('load').onclick = async () => {
   $('load').disabled = true;
   $('go').disabled = true;
   const t0 = performance.now();
+  let timer = 0;
   try {
     if (wllama) await wllama.exit();
     wllama = new Wllama(
       { default: './vendor/wllama/wasm/wllama.wasm' },
-      { allowOffline: true, suppressNativeLog: true },
+      { allowOffline: true, logger },
     );
+    // Safari など JSPI 非対応のブラウザ向けの互換ビルド（同梱分を使う）
+    wllama.setCompat({
+      wasm: './vendor/wllama-compat/wllama.wasm',
+      worker: './vendor/wllama-compat/wllama.js',
+    });
+    let stage = 'モデルを取得中…';
+    timer = setInterval(() => {
+      if (stage) status(`${stage} 経過 ${((performance.now() - t0) / 1000).toFixed(0)}秒`);
+    }, 1000);
     await wllama.loadModelFromHF(
       { repo: REPO, file: $('quant').value },
       {
@@ -116,16 +152,20 @@ $('load').onclick = async () => {
         progressCallback: ({ loaded, total }) => {
           const p = total ? loaded / total : 0;
           $('bar').style.width = `${(p * 100).toFixed(1)}%`;
-          status(`モデルを取得中… ${(loaded / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB`);
+          stage = loaded >= total
+            ? 'モデルを展開中…（1〜2分かかることがあります）'
+            : `モデルを取得中… ${(loaded / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB`;
         },
       },
     );
+    clearInterval(timer);
     $('bar').style.width = '0';
     const sec = ((performance.now() - t0) / 1000).toFixed(1);
     status(`読み込み完了 ${sec}秒 / ${$('gpu').value === '0' ? 'CPU' : 'GPU'} / マルチスレッド: ${wllama.isMultithread() ? 'あり' : 'なし'}`);
     $('go').disabled = false;
   } catch (e) {
-    console.error(e);
+    clearInterval(timer);
+    logLine('ERROR', [e]);
     status(`読み込み失敗: ${e?.message || e}`);
   } finally {
     $('load').disabled = false;
@@ -171,7 +211,7 @@ $('form').onsubmit = async (ev) => {
     status(`翻訳 ${total.toFixed(1)}秒（最初の文字まで ${ttft.toFixed(1)}秒${tps ? `、${tps.toFixed(1)} トークン/秒` : ''}）`);
     $('text').value = '';
   } catch (e) {
-    console.error(e);
+    logLine('ERROR', [e]);
     status(`翻訳失敗: ${e?.message || e}`);
   } finally {
     $('out').classList.remove('busy');
