@@ -1,6 +1,6 @@
 {
-  "name": "対面翻訳（試作）",
-  "short_name": "対面翻訳",
+  "name": "聞き取り翻訳（試作）",
+  "short_name": "聞き取り翻訳",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

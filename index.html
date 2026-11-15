@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <link rel="manifest" href="manifest.webmanifest">
-<title>対面翻訳（試作）</title>
+<title>聞き取り翻訳（試作）</title>
 <style>
   :root { --green: #1a7f37; --line: #d8d8d8; --muted: #777; }
   * { box-sizing: border-box; }
@@ -14,33 +14,38 @@
   header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 12px; background: #f1f1f1; font-size: 13px; }
   header b { flex: 1; }
   header select, header button { font-size: 13px; padding: 4px 6px; }
-  .pane { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 16px; font-size: 20px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
-  .pane.them { transform: rotate(180deg); border-top: 1px solid var(--line); }
-  .pane:empty::before { content: attr(data-placeholder); color: #aaa; }
-  .pane.busy { color: var(--muted); }
-  .pane div { margin-bottom: 6px; }
-  .pane .interim, .pane .pending { color: #aaa; }
-  #status { padding: 3px 12px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); min-height: 20px; }
   #bar { height: 3px; background: var(--green); width: 0; transition: width .2s; }
+
+  /* 原文と日本語訳の組を、上から順に並べる */
+  #feed { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 16px; }
+  #feed:empty::before { content: "🎤 を押すと聞き取りを始めます。原文と日本語訳がここに並びます。"; color: #aaa; font-size: 15px; }
+  .item { padding: 8px 0; border-bottom: 1px solid #eee; }
+  .item .orig { font-size: 14px; line-height: 1.4; color: var(--muted); word-break: break-word; }
+  .item .ja { font-size: 20px; line-height: 1.45; margin-top: 2px; word-break: break-word; }
+  .item .ja.pending { color: #aaa; }
+  .item.interim .orig { color: #aaa; font-style: italic; }
+
+  #status { padding: 3px 12px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); min-height: 20px; }
   #logbox { font-size: 11px; color: var(--muted); padding: 0 12px; }
   #log { max-height: 30vh; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 4px 0; font-size: 10px; }
   form { display: flex; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--line); }
-  textarea { flex: 1; font: inherit; font-size: 17px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; resize: none; height: 46px; }
-  form button { border: 0; background: var(--green); color: #fff; font-size: 16px; padding: 0 16px; border-radius: 10px; }
+  textarea { flex: 1; font: inherit; font-size: 16px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; resize: none; height: 42px; }
+  form button { border: 0; background: var(--green); color: #fff; font-size: 15px; padding: 0 14px; border-radius: 10px; }
   form button:disabled { background: #b5b5b5; }
-  .langs { display: flex; align-items: center; gap: 6px; padding: 0 12px 8px; }
-  .langs select { flex: 1; min-width: 0; font-size: 16px; padding: 8px; border-radius: 10px; border: 1px solid var(--line); background: #f6f6f6; }
-  .langs button { border: 0; background: none; font-size: 20px; }
-  .langs .mic { width: 46px; height: 46px; border-radius: 50%; background: var(--green); color: #fff; font-size: 20px; flex: none; }
-  .langs .mic:disabled { background: #b5b5b5; }
-  .langs .mic.rec { background: #d1242f; animation: pulse 1s infinite; }
+  .controls { display: flex; align-items: center; gap: 8px; padding: 0 12px 8px; }
+  .controls select { flex: 1; min-width: 0; font-size: 16px; padding: 8px; border-radius: 10px; border: 1px solid var(--line); background: #f6f6f6; }
+  .controls .to { font-size: 14px; color: var(--muted); white-space: nowrap; }
+  .controls #clear { border: 1px solid var(--line); background: #fff; border-radius: 10px; font-size: 13px; padding: 8px 10px; color: var(--muted); }
+  .mic { width: 56px; height: 56px; border-radius: 50%; border: 0; background: var(--green); color: #fff; font-size: 24px; flex: none; }
+  .mic:disabled { background: #b5b5b5; }
+  .mic.rec { background: #d1242f; animation: pulse 1s infinite; }
   @keyframes pulse { 50% { opacity: .55; } }
 </style>
 </head>
 <body>
 <header>
-  <b>対面翻訳（試作）</b>
-  <select id="quant" title="モデル">
+  <b>聞き取り翻訳（試作）</b>
+  <select id="quant" title="翻訳モデル">
     <option value="plamo-3-translate-0.8b-Q4_0.gguf">Q4_0 (548MB)</option>
     <option value="plamo-3-translate-0.8b-Q4_K_M.gguf">Q4_K_M (573MB)</option>
     <option value="plamo-3-translate-0.8b-Q3_K_M.gguf">Q3_K_M (486MB)</option>
@@ -56,28 +61,26 @@
     <option value="onnx-community/whisper-base">音声 base (77MB)</option>
     <option value="onnx-community/whisper-small">音声 small (249MB)</option>
   </select>
-  <label title="話している途中の認識結果も表示する（処理が重くなります）"><input type="checkbox" id="interimOn"> 途中表示</label>
+  <label title="話している途中の認識結果も表示する"><input type="checkbox" id="interimOn" checked> 途中表示</label>
   <button id="load">読み込む</button>
 </header>
 <div id="bar"></div>
 
-<div class="pane them" id="out" data-placeholder="相手向きの表示"></div>
-<div class="pane" id="src" data-placeholder="自分向きの表示"></div>
+<div id="feed"></div>
 
 <div id="status">モデル未読み込み。「読み込む」を押してください（初回のみ通信が必要です）。</div>
 
 <details id="logbox"><summary>ログ</summary><pre id="log"></pre></details>
 
 <form id="form">
-  <textarea id="text" placeholder="翻訳するテキストを入力" enterkeyhint="send"></textarea>
+  <textarea id="text" placeholder="文字で入力して翻訳" enterkeyhint="send"></textarea>
   <button id="go" disabled>翻訳</button>
 </form>
-<div class="langs">
-  <button id="micMe" class="mic" type="button" disabled aria-label="自分が話す">🎤</button>
-  <select id="from" title="自分の言語"></select>
-  <button id="swap" type="button" aria-label="入れ替え">⇄</button>
-  <select id="to" title="相手の言語"></select>
-  <button id="micThem" class="mic" type="button" disabled aria-label="相手が話す">🎤</button>
+<div class="controls">
+  <button id="mic" class="mic" type="button" disabled aria-label="聞き取りを開始・停止">🎤</button>
+  <select id="from" title="聞き取る言語"></select>
+  <span class="to">→ 日本語</span>
+  <button id="clear" type="button">消去</button>
 </div>
 
 <script type="module">
@@ -105,19 +108,25 @@ if ('serviceWorker' in navigator) {
 }
 
 const REPO = 'pfnet/plamo-3-translate-0.8b-GGUF';
+const TARGET = 'ja'; // 訳す先は日本語に固定
+// 聞き取る言語。[翻訳モデルの言語コード, 表示名, 音声認識の言語コード]
 const LANGS = [
-  ['ja', '日本語'], ['en', '英語'], ['zh-hans', '中国語(簡体)'], ['zh-hant', '中国語(繁体)'],
-  ['ko', '韓国語'], ['fr', 'フランス語'], ['de', 'ドイツ語'], ['es', 'スペイン語'],
-  ['vi', 'ベトナム語'], ['th', 'タイ語'],
+  ['en', '英語', 'en'], ['zh-hans', '中国語(簡体)', 'zh'], ['zh-hant', '中国語(繁体)', 'zh'],
+  ['ko', '韓国語', 'ko'], ['fr', 'フランス語', 'fr'], ['de', 'ドイツ語', 'de'],
+  ['es', 'スペイン語', 'es'], ['it', 'イタリア語', 'it'], ['ru', 'ロシア語', 'ru'],
+  ['vi', 'ベトナム語', 'vi'], ['th', 'タイ語', 'th'], ['id', 'インドネシア語', 'id'],
+  ['nl', 'オランダ語', 'nl'], ['ar', 'アラビア語', 'ar'], ['hi', 'ヒンディー語', 'hi'],
+  ['auto', '自動判定', null],
 ];
+const HISTORY_PAIRS = 3; // 直前の対訳を何組まで文脈として渡すか
+
 const $ = (id) => document.getElementById(id);
 const status = (s) => { $('status').textContent = s; };
 
 // 画面上のログ（iPhone では開発者ツールが使えないため）
 const logLine = (level, args) => {
   const t = args.map((a) => (a instanceof Error ? `${a.name}: ${a.message}` : typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
-  $('log').textContent += `[${new Date().toLocaleTimeString()}] ${level} ${t.slice(0, 300)}
-`;
+  $('log').textContent += `[${new Date().toLocaleTimeString()}] ${level} ${t.slice(0, 300)}\n`;
   $('log').scrollTop = $('log').scrollHeight;
   if (t.includes('Aborted(') && onAbort) onAbort(t);
 };
@@ -133,25 +142,19 @@ addEventListener('unhandledrejection', (e) => logLine('ERROR', [e.reason]));
 logLine('log', [`UA: ${navigator.userAgent}`]);
 logLine('log', [`isolated=${self.crossOriginIsolated} webgpu=${!!navigator.gpu} jspi=${hasJspi} mem64=${hasMem64} compat=${forceCompat} cores=${navigator.hardwareConcurrency} mem=${navigator.deviceMemory ?? '?'}GB`]);
 
-for (const sel of [$('from'), $('to')]) {
-  for (const [code, name] of LANGS) sel.add(new Option(name, code));
-}
-$('from').value = 'ja';
-$('to').value = 'en';
-$('swap').onclick = () => { [$('from').value, $('to').value] = [$('to').value, $('from').value]; };
+for (const [code, name] of LANGS) $('from').add(new Option(name, code));
+$('from').value = 'en';
+const asrLangOf = (code) => LANGS.find((l) => l[0] === code)?.[2] ?? null;
 
 // WebGPU が使える端末では GPU を初期値にする（iPhone 実機で CPU の約 8 倍速を確認）
-const isPhone = /iPhone|iPad|Android/.test(navigator.userAgent);
 $('gpu').value = navigator.gpu ? '99' : '0';
-// 途中表示は既定で入れる（重い場合は画面右上のチェックで切れる）
-$('interimOn').checked = true;
 
 let wllama = null;
 
 $('load').onclick = async () => {
   $('load').disabled = true;
   $('go').disabled = true;
-  setMics(false);
+  setMic(false);
   const t0 = performance.now();
   let timer = 0;
   try {
@@ -208,7 +211,7 @@ $('load').onclick = async () => {
     }
     clearInterval(timer);
     $('bar').style.width = '0';
-    setMics(true);
+    setMic(true);
     status(`読み込み完了: 翻訳 ${llmSec}秒 / ${asrMsg} / ${$('gpu').value === '0' ? 'CPU' : 'GPU'} / マルチスレッド: ${wllama.isMultithread() ? 'あり' : 'なし'}`);
   } catch (e) {
     clearInterval(timer);
@@ -219,21 +222,31 @@ $('load').onclick = async () => {
   }
 };
 
-// PFML3 形式のプロンプト（モデルカード記載の形式）
-function buildPrompt(text, from, to) {
-  return '<|plamo:tag|>dataset<|plamo:msg|>translation'
-    + `<|plamo:tag|>input<|plamo:key|>lang<|plamo:val|>${from}<|plamo:msg|>${text}`
-    + `<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>${to}<|plamo:msg|>`;
+// ---------- 翻訳 ----------
+// 直前の対訳。話の流れを踏まえて訳せるよう、次の翻訳に文脈として渡す。
+let history = [];
+
+// PFML3 形式のプロンプト（モデルカード記載の形式）。
+// 直前の対訳を並べ、最後に今回の原文と空の output を置く。
+// 言語が「自動判定」のときは原文の言語を書かず、モデルに判断させる。
+function buildPrompt(text, from) {
+  const input = (t) => (from === 'auto'
+    ? `<|plamo:tag|>input<|plamo:msg|>${t}`
+    : `<|plamo:tag|>input<|plamo:key|>lang<|plamo:val|>${from}<|plamo:msg|>${t}`);
+  const output = (t) => `<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>${TARGET}<|plamo:msg|>${t}`;
+  let p = '<|plamo:tag|>dataset<|plamo:msg|>translation';
+  for (const h of history) if (h.from === from) p += input(h.src) + output(h.ja);
+  return p + input(text) + output('');
 }
 
 // 翻訳の中核。訳文が伸びるたびに onText を呼び、最後に所要時間の説明を返す。
-async function runTranslation(text, from, to, onText) {
+async function runTranslation(text, from, onText) {
   const t0 = performance.now();
   let first = 0;
   let acc = '';
   let last = null;
   await wllama.createCompletion({
-    prompt: buildPrompt(text, from, to),
+    prompt: buildPrompt(text, from),
     max_tokens: 512,
     temperature: 0,
     stop: ['<|plamo:tag|>', '<|plamo:bos|>'],
@@ -245,40 +258,82 @@ async function runTranslation(text, from, to, onText) {
       last = chunk;
     },
   });
+  const ja = acc.trim();
+  if (ja) {
+    history.push({ from, src: text, ja });
+    if (history.length > HISTORY_PAIRS) history.shift();
+  }
   const total = (performance.now() - t0) / 1000;
   const ttft = first ? (first - t0) / 1000 : total;
   const tps = last?.timings?.predicted_per_second;
   return `翻訳 ${total.toFixed(1)}秒（最初の文字まで ${ttft.toFixed(1)}秒${tps ? `、${tps.toFixed(1)} トークン/秒` : ''}）`;
 }
 
-// 翻訳して表示する。speaker='me' なら原文を下（自分向き）、訳を上（相手向き）に出す。
-// speaker='them' ならその逆。
-async function translate(text, from, to, speaker) {
-  if (!text || !wllama) return;
-  const srcPane = speaker === 'me' ? $('src') : $('out');
-  const outPane = speaker === 'me' ? $('out') : $('src');
-  $('go').disabled = true;
-  srcPane.textContent = text;
-  outPane.textContent = '';
-  outPane.classList.add('busy');
+// ---------- 表示（原文＋日本語訳の組） ----------
+function addItem(origText) {
+  const item = document.createElement('div');
+  item.className = 'item';
+  const orig = document.createElement('div');
+  orig.className = 'orig';
+  orig.textContent = origText;
+  const ja = document.createElement('div');
+  ja.className = 'ja pending';
+  ja.textContent = '…';
+  item.append(orig, ja);
+  $('feed').append(item);
+  scrollEnd();
+  return { item, orig, ja };
+}
+function scrollEnd() { $('feed').scrollTop = $('feed').scrollHeight; }
+
+$('clear').onclick = () => {
+  if (live) return;
+  $('feed').textContent = '';
+  history = [];
+};
+
+// 翻訳待ちの列。聞き取りと文字入力のどちらからも、ここに積んで順に訳す。
+const mtQueue = [];
+let mtBusy = false;
+let lastMsg = '';
+
+async function pumpMt() {
+  if (mtBusy || !mtQueue.length) return;
+  mtBusy = true;
+  const { text, from, row } = mtQueue.shift();
   try {
-    return await runTranslation(text, from, to, (t) => { outPane.textContent = t; });
+    const msg = await runTranslation(text, from, (t) => {
+      row.ja.className = 'ja';
+      row.ja.textContent = t;
+      scrollEnd();
+    });
+    lastMsg = lastMsg.includes('認識') ? `${lastMsg.split(' / ')[0]} / ${msg}` : msg;
   } catch (e) {
     logLine('ERROR', [e]);
-    return `翻訳失敗: ${e?.message || e}`;
+    row.ja.textContent = '（翻訳失敗）';
   } finally {
-    outPane.classList.remove('busy');
-    $('go').disabled = false;
+    mtBusy = false;
+    showStatus();
+    pumpMt();
   }
 }
 
-$('form').onsubmit = async (ev) => {
+$('form').onsubmit = (ev) => {
   ev.preventDefault();
   const text = $('text').value.trim();
   if (!text || !wllama) return;
   $('text').value = '';
-  status(await translate(text, $('from').value, $('to').value, 'me'));
+  lastMsg = '';
+  mtQueue.push({ text, from: $('from').value, row: addItem(text) });
+  pumpMt();
 };
+
+$('text').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) {
+    ev.preventDefault();
+    $('form').requestSubmit();
+  }
+});
 
 // ---------- 音声認識（Whisper） ----------
 let asrWorker = null;
@@ -306,16 +361,16 @@ function loadAsr(model, onProgress) {
   });
 }
 
+// lang が null のときは、音声認識モデルに言語を自動判定させる
 function transcribe(audio, lang) {
   const id = ++asrSeq;
   return new Promise((resolve, reject) => {
     asrPending.set(id, { resolve, reject });
-    // Whisper は簡体字・繁体字を区別しないので zh にまとめる
-    asrWorker.postMessage({ type: 'run', id, audio, language: lang.startsWith('zh') ? 'zh' : lang });
+    asrWorker.postMessage({ type: 'run', id, audio, language: lang });
   });
 }
 
-// 録音データ（または音声ファイル）を 16kHz・モノラルの波形に変換する
+// 音声ファイルを 16kHz・モノラルの波形に変換する（動作確認用）
 async function decodeTo16k(arrayBuffer) {
   const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
   try {
@@ -329,10 +384,10 @@ async function decodeTo16k(arrayBuffer) {
 // ---------- 聞き取りながら翻訳する ----------
 // 無音で文を区切り、区切れた文から順に 認識 → 翻訳 して追記していく。
 // 話している最中は、認識途中の文字を薄い色で出す。
-const SILENCE_MS = 700;      // これだけ無音が続いたら文の終わりとみなす
+const SILENCE_MS = 700;       // これだけ無音が続いたら文の終わりとみなす
 const MAX_SEGMENT_MS = 15000; // 区切りが無くても、この長さで一度確定する
-const MIN_SPEECH_MS = 300;   // これより短い音は雑音として捨てる
-const PREROLL_MS = 300;      // 話し始めの頭が欠けないよう、直前の音も含める
+const MIN_SPEECH_MS = 300;    // これより短い音は雑音として捨てる
+const PREROLL_MS = 300;       // 話し始めの頭が欠けないよう、直前の音も含める
 const INTERIM_EVERY_MS = 1000;
 
 let live = null; // 聞き取り中の状態
@@ -361,24 +416,17 @@ function concat(chunks) {
   return out;
 }
 
-function newLive(speaker, rate) {
-  const from = speaker === 'me' ? $('from').value : $('to').value;
-  const to = speaker === 'me' ? $('to').value : $('from').value;
-  const srcPane = speaker === 'me' ? $('src') : $('out');
-  const outPane = speaker === 'me' ? $('out') : $('src');
-  srcPane.textContent = '';
-  outPane.textContent = '';
-  const interim = document.createElement('div');
-  interim.className = 'interim';
-  srcPane.append(interim);
+function newLive(rate) {
+  const from = $('from').value;
   return {
-    speaker, rate, from, to, srcPane, outPane, interim,
+    rate, from, asrLang: asrLangOf(from),
     stopped: false,
+    interim: null, // 話している途中の仮の行
     // 区切り検出
     inSpeech: false, chunks: [], pre: [], preMs: 0, loudMs: 0, silenceMs: 0, segMs: 0, voicedMs: 0,
     noise: 0.004, segId: 0, lastInterim: 0,
-    // 処理待ち
-    finals: [], asrBusy: false, mtQueue: [], mtBusy: false, lastMsg: '',
+    // 認識待ち
+    finals: [], asrBusy: false,
   };
 }
 
@@ -418,41 +466,45 @@ function feed(L, chunk) {
   else maybeInterim(L);
 }
 
-// 文の区切り。確定用の認識待ちに積む
+// 文の区切り。確定用の認識待ちに積む。途中表示の行があれば、それを確定行として使い回す。
 function endSegment(L) {
   if (!L.inSpeech) return;
   const audio = L.voicedMs >= MIN_SPEECH_MS ? resampleTo16k(concat(L.chunks), L.rate) : null;
   L.inSpeech = false;
   L.chunks = [];
   L.segId++;
-  L.interim.textContent = '';
+  const row = L.interim;
+  L.interim = null;
   if (audio) {
-    const row = document.createElement('div');
-    row.className = 'pending';
-    row.textContent = '…';
-    L.srcPane.insertBefore(row, L.interim);
-    L.finals.push({ audio, row });
+    L.finals.push({ audio, row: row ?? addItem('…') });
     pumpAsr(L);
+  } else if (row) {
+    row.item.remove();
   }
-  liveStatus(L);
+  showStatus();
 }
 
 // 話している途中の仮の認識（手が空いているときだけ）
 function maybeInterim(L) {
   if (!$('interimOn').checked) return;
-  // 翻訳が動いている間は、翻訳を優先して途中表示は休む
-  if (L.asrBusy || L.finals.length || L.mtBusy || L.mtQueue.length) return;
+  // 確定待ちや翻訳が動いている間は、そちらを優先して途中表示は休む
+  if (L.asrBusy || L.finals.length || mtBusy || mtQueue.length) return;
   if (L.segMs < 1200 || performance.now() - L.lastInterim < INTERIM_EVERY_MS) return;
   L.lastInterim = performance.now();
   const segId = L.segId;
   const audio = resampleTo16k(concat(L.chunks), L.rate);
   L.asrBusy = true;
-  transcribe(audio, L.from)
+  transcribe(audio, L.asrLang)
     .then((text) => {
-      if (L.inSpeech && L.segId === segId) {
-        L.interim.textContent = cleanAsr(text);
-        scrollEnd(L.srcPane);
+      const t = cleanAsr(text);
+      if (!t || !L.inSpeech || L.segId !== segId) return;
+      if (!L.interim) {
+        L.interim = addItem(t);
+        L.interim.item.classList.add('interim');
+      } else {
+        L.interim.orig.textContent = t;
       }
+      scrollEnd();
     })
     .catch((e) => logLine('ERROR', [e]))
     .finally(() => { L.asrBusy = false; pumpAsr(L); });
@@ -469,69 +521,54 @@ async function pumpAsr(L) {
   const { audio, row } = L.finals.shift();
   try {
     const t0 = performance.now();
-    const text = cleanAsr(await transcribe(audio, L.from));
-    L.lastMsg = `認識 ${((performance.now() - t0) / 1000).toFixed(1)}秒`;
+    const text = cleanAsr(await transcribe(audio, L.asrLang));
+    lastMsg = `認識 ${((performance.now() - t0) / 1000).toFixed(1)}秒`;
     if (!text) {
-      row.remove();
+      row.item.remove();
     } else {
-      row.className = '';
-      row.textContent = text;
-      const outRow = document.createElement('div');
-      outRow.className = 'pending';
-      outRow.textContent = '…';
-      L.outPane.append(outRow);
-      scrollEnd(L.srcPane);
-      scrollEnd(L.outPane);
-      L.mtQueue.push({ text, outRow });
-      pumpMt(L);
+      row.item.classList.remove('interim');
+      row.orig.textContent = text;
+      scrollEnd();
+      mtQueue.push({ text, from: L.from, row });
+      pumpMt();
     }
   } catch (e) {
     logLine('ERROR', [e]);
-    row.remove();
+    row.item.remove();
   } finally {
     L.asrBusy = false;
-    liveStatus(L);
+    showStatus();
     pumpAsr(L);
   }
 }
 
-async function pumpMt(L) {
-  if (L.mtBusy || !L.mtQueue.length) return;
-  L.mtBusy = true;
-  const { text, outRow } = L.mtQueue.shift();
-  try {
-    const msg = await runTranslation(text, L.from, L.to, (t) => {
-      outRow.className = '';
-      outRow.textContent = t;
-      scrollEnd(L.outPane);
-    });
-    L.lastMsg = `${L.lastMsg.split(' / ')[0]} / ${msg}`;
-  } catch (e) {
-    logLine('ERROR', [e]);
-    outRow.textContent = '（翻訳失敗）';
-  } finally {
-    L.mtBusy = false;
-    liveStatus(L);
-    pumpMt(L);
+function showStatus() {
+  const L = live;
+  const waiting = L ? L.finals.length + (L.asrBusy ? 1 : 0) : 0;
+  const mt = mtQueue.length + (mtBusy ? 1 : 0);
+  let head = '';
+  if (L) {
+    head = L.stopped
+      ? (waiting || mt ? '停止。残りを処理中…' : '停止')
+      : '聞き取り中… もう一度押すと止まります';
   }
+  const queue = waiting || mt ? `（認識待ち ${waiting} / 翻訳待ち ${mt}）` : '';
+  status([head + queue, lastMsg].filter(Boolean).join(' ｜ '));
+  if (L && L.stopped && !waiting) { live = null; setMic(true); }
 }
 
-function scrollEnd(pane) { pane.scrollTop = pane.scrollHeight; }
-
-function liveStatus(L) {
-  const waiting = L.finals.length + (L.asrBusy ? 1 : 0);
-  const mt = L.mtQueue.length + (L.mtBusy ? 1 : 0);
-  const head = L.stopped
-    ? (waiting || mt ? '停止。残りを処理中…' : '停止')
-    : '聞き取り中… もう一度押すと止まります';
-  status(`${head}${waiting || mt ? `（認識待ち ${waiting} / 翻訳待ち ${mt}）` : ''}${L.lastMsg ? ` ｜ ${L.lastMsg}` : ''}`);
-  if (L.stopped && !waiting && !mt && live === L) { live = null; setMics(true); }
+// 聞き取り中は画面が消えないようにする（対応している端末のみ）
+let wakeLock = null;
+async function keepAwake(on) {
+  try {
+    if (on) wakeLock = await navigator.wakeLock?.request('screen');
+    else { await wakeLock?.release(); wakeLock = null; }
+  } catch { /* 使えない端末では何もしない */ }
 }
 
-async function toggleMic(speaker) {
-  const btn = speaker === 'me' ? $('micMe') : $('micThem');
+async function toggleMic() {
   if (live) {
-    if (live.speaker === speaker && !live.stopped) stopLive();
+    if (!live.stopped) stopLive();
     return;
   }
   let stream;
@@ -546,7 +583,7 @@ async function toggleMic(speaker) {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
     await ctx.audioWorklet.addModule('./pcm-worklet.js');
-    const L = newLive(speaker, ctx.sampleRate);
+    const L = newLive(ctx.sampleRate);
     const node = new AudioWorkletNode(ctx, 'pcm');
     node.port.onmessage = ({ data }) => feed(L, data);
     const mute = ctx.createGain();
@@ -554,11 +591,12 @@ async function toggleMic(speaker) {
     ctx.createMediaStreamSource(stream).connect(node).connect(mute).connect(ctx.destination);
     L.stream = stream;
     L.ctx = ctx;
-    L.btn = btn;
     live = L;
-    btn.classList.add('rec');
-    (speaker === 'me' ? $('micThem') : $('micMe')).disabled = true;
-    liveStatus(L);
+    lastMsg = '';
+    $('mic').classList.add('rec');
+    $('from').disabled = true;
+    keepAwake(true);
+    showStatus();
   } catch (e) {
     stream.getTracks().forEach((t) => t.stop());
     logLine('ERROR', [e]);
@@ -573,24 +611,22 @@ function stopLive() {
   L.stopped = true;
   L.stream?.getTracks().forEach((t) => t.stop());
   L.ctx?.close();
-  L.btn?.classList.remove('rec');
-  $('micMe').disabled = true;
-  $('micThem').disabled = true;
-  liveStatus(L);
+  $('mic').classList.remove('rec');
+  $('mic').disabled = true;
+  $('from').disabled = false;
+  keepAwake(false);
+  showStatus();
 }
 
-function setMics(enabled) {
-  const ok = enabled && asrReady && !!wllama;
-  $('micMe').disabled = !ok;
-  $('micThem').disabled = !ok;
+function setMic(enabled) {
+  $('mic').disabled = !(enabled && asrReady && !!wllama);
 }
-$('micMe').onclick = () => toggleMic('me');
-$('micThem').onclick = () => toggleMic('them');
+$('mic').onclick = () => toggleMic();
 
 // 動作確認用: 音声ファイルを実際の速さで流し込み、聞き取り〜翻訳の流れ全体を試す
-window.__liveTest = async (url, speaker = 'me') => {
+window.__liveTest = async (url) => {
   const audio = await decodeTo16k(await (await fetch(url)).arrayBuffer());
-  const L = newLive(speaker, 16000);
+  const L = newLive(16000);
   live = L;
   const STEP = 1600; // 0.1 秒ぶん
   for (let i = 0; i < audio.length; i += STEP) {
@@ -598,24 +634,12 @@ window.__liveTest = async (url, speaker = 'me') => {
     await new Promise((r) => setTimeout(r, 100));
   }
   stopLive();
-  while (live === L) await new Promise((r) => setTimeout(r, 200));
-  return { src: L.srcPane.innerText, out: L.outPane.innerText, status: $('status').textContent };
+  while (live === L || mtBusy || mtQueue.length) await new Promise((r) => setTimeout(r, 200));
+  return {
+    items: [...$('feed').querySelectorAll('.item')].map((it) => [it.children[0].textContent, it.children[1].textContent]),
+    status: $('status').textContent,
+  };
 };
-
-// 動作確認用: 音声ファイルの URL を渡して認識だけ試す
-window.__asrTest = async (url, lang) => {
-  const audio = await decodeTo16k(await (await fetch(url)).arrayBuffer());
-  const t0 = performance.now();
-  const text = await transcribe(audio, lang);
-  return { text, sec: (performance.now() - t0) / 1000, audioSec: audio.length / 16000 };
-};
-
-$('text').addEventListener('keydown', (ev) => {
-  if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) {
-    ev.preventDefault();
-    $('form').requestSubmit();
-  }
-});
 </script>
 </body>
 </html>

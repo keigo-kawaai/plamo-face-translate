@@ -31,7 +31,7 @@ self.onmessage = async ({ data }) => {
     } else if (data.type === 'run') {
       if (!asr) throw new Error('音声認識モデルが未読み込みです');
       const out = await asr(data.audio, {
-        language: data.language,
+        language: data.language ?? undefined, // 未指定なら言語を自動判定
         task: 'transcribe',
         chunk_length_s: 30,
       });
