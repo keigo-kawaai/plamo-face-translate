@@ -9,11 +9,13 @@ env.backends.onnx.wasm.wasmPaths = {
 };
 
 let asr = null;
+let isWhisper = true;
 
 self.onmessage = async ({ data }) => {
   try {
     if (data.type === 'load') {
       asr = null;
+      isWhisper = data.model.includes('whisper');
       const files = new Map();
       asr = await pipeline('automatic-speech-recognition', data.model, {
         dtype: 'q8',
@@ -30,11 +32,14 @@ self.onmessage = async ({ data }) => {
       self.postMessage({ type: 'ready' });
     } else if (data.type === 'run') {
       if (!asr) throw new Error('音声認識モデルが未読み込みです');
-      const out = await asr(data.audio, {
-        language: data.language ?? undefined, // 未指定なら言語を自動判定
-        task: 'transcribe',
-        chunk_length_s: 30,
-      });
+      // Moonshine は英語専用で、言語などの指定を受け付けない
+      const out = isWhisper
+        ? await asr(data.audio, {
+          language: data.language ?? undefined, // 未指定なら言語を自動判定
+          task: 'transcribe',
+          chunk_length_s: 30,
+        })
+        : await asr(data.audio);
       self.postMessage({ type: 'result', id: data.id, text: (out.text || '').trim() });
     }
   } catch (e) {

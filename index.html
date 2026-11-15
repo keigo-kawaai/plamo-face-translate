@@ -57,6 +57,8 @@
   </select>
   <select id="asrModel" title="音声認識">
     <option value="">音声なし</option>
+    <option value="onnx-community/moonshine-tiny-ONNX">英語専用・高速 tiny (28MB)</option>
+    <option value="onnx-community/moonshine-base-ONNX">英語専用・高速 base</option>
     <option value="onnx-community/whisper-tiny" selected>音声 tiny (41MB)</option>
     <option value="onnx-community/whisper-base">音声 base (77MB)</option>
     <option value="onnx-community/whisper-small">音声 small (249MB)</option>
@@ -240,19 +242,18 @@ function buildPrompt(text, from) {
 }
 
 // 翻訳の中核。訳文が伸びるたびに onText を呼び、最後に所要時間の説明を返す。
-// provisional=true は話の途中の仮訳。履歴には残さず、signal で中断できる。
-async function runTranslation(text, from, onText, { provisional = false, signal } = {}) {
+// provisional=true は話の途中の仮訳。履歴には残さず、短く打ち切る。
+async function runTranslation(text, from, onText, { provisional = false } = {}) {
   const t0 = performance.now();
   let first = 0;
   let acc = '';
   let last = null;
   await wllama.createCompletion({
     prompt: buildPrompt(text, from),
-    max_tokens: 512,
+    max_tokens: provisional ? 96 : 512,
     temperature: 0,
     stop: ['<|plamo:tag|>', '<|plamo:bos|>'],
     stream: true,
-    abortSignal: signal,
     onData: (chunk) => {
       if (!first) first = performance.now();
       acc += chunk.choices?.[0]?.text ?? '';
@@ -303,16 +304,26 @@ async function pumpMt() {
   if (mtBusy || !mtQueue.length) return;
   mtBusy = true;
   const { text, from, row } = mtQueue.shift();
+  const show = (t) => {
+    row.ja.className = 'ja';
+    row.ja.textContent = t;
+    scrollEnd();
+  };
   try {
-    const msg = await runTranslation(text, from, (t) => {
-      row.ja.className = 'ja';
-      row.ja.textContent = t;
-      scrollEnd();
-    });
+    let msg;
+    try {
+      msg = await runTranslation(text, from, show);
+    } catch (e) {
+      logLine('ERROR', ['翻訳（やり直します）', e]);
+      await new Promise((r) => setTimeout(r, 300));
+      msg = await runTranslation(text, from, show);
+    }
     lastMsg = lastMsg.includes('認識') ? `${lastMsg.split(' / ')[0]} / ${msg}` : msg;
   } catch (e) {
-    logLine('ERROR', [e]);
+    logLine('ERROR', ['翻訳', e]);
+    row.ja.className = 'ja pending';
     row.ja.textContent = '（翻訳失敗）';
+    lastMsg = `翻訳失敗: ${String(e?.message || e).slice(0, 80)}`;
   } finally {
     mtBusy = false;
     showStatus();
@@ -386,7 +397,7 @@ async function decodeTo16k(arrayBuffer) {
 // ---------- 聞き取りながら翻訳する ----------
 // 無音で文を区切り、区切れた文から順に 認識 → 翻訳 して追記していく。
 // 話している最中は、認識途中の文字を薄い色で出す。
-const SILENCE_MS = 700;       // これだけ無音が続いたら文の終わりとみなす
+const SILENCE_MS = 500;       // これだけ無音が続いたら文の終わりとみなす
 const LONG_SEGMENT_MS = 4000; // これより長く話が続いたら、短い息継ぎでも区切る
 const SHORT_SILENCE_MS = 250; // そのときに区切りとみなす無音の長さ
 const MAX_SEGMENT_MS = 9000;  // 息継ぎが無くても、この長さで一度確定する
@@ -518,7 +529,6 @@ function maybeInterim(L) {
 
 // 話している途中の文を仮に訳して、薄い色で出す。
 // 確定文の翻訳が待っているときは行わない。確定したら正式な訳で置き換わる。
-let provAbort = null;
 async function maybeProvisional(L) {
   const row = L.interim;
   if (!row || mtBusy || mtQueue.length) return;
@@ -526,16 +536,14 @@ async function maybeProvisional(L) {
   if (!text || text === row.provText) return;
   row.provText = text;
   mtBusy = true;
-  provAbort = new AbortController();
   try {
     await runTranslation(text, L.from, (t) => {
       if (row.ja.classList.contains('pending')) row.ja.textContent = t;
       scrollEnd();
-    }, { provisional: true, signal: provAbort.signal });
+    }, { provisional: true });
   } catch (e) {
-    if (e?.name !== 'AbortError') logLine('ERROR', [e]);
+    logLine('ERROR', ['仮訳', e]);
   } finally {
-    provAbort = null;
     mtBusy = false;
     pumpMt();
     if (L.interim === row) maybeProvisional(L);
@@ -561,7 +569,6 @@ async function pumpAsr(L) {
       row.item.classList.remove('interim');
       row.orig.textContent = text;
       scrollEnd();
-      provAbort?.abort(); // 仮訳が動いていたら止めて、確定文の翻訳を先に通す
       mtQueue.push({ text, from: L.from, row });
       pumpMt();
     }
