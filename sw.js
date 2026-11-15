@@ -3,7 +3,7 @@
 //    マルチスレッド実行（SharedArrayBuffer）を有効にする。
 // 2. 画面とライブラリを端末内に保存し、通信なしでも開けるようにする。
 //    （翻訳モデル本体はライブラリ側が別途、端末内に保存する）
-const CACHE = 'app-shell-v9';
+const CACHE = 'app-shell-v10';
 
 self.addEventListener('install', () => self.skipWaiting());
 

@@ -143,8 +143,8 @@ $('swap').onclick = () => { [$('from').value, $('to').value] = [$('to').value, $
 // WebGPU が使える端末では GPU を初期値にする（iPhone 実機で CPU の約 8 倍速を確認）
 const isPhone = /iPhone|iPad|Android/.test(navigator.userAgent);
 $('gpu').value = navigator.gpu ? '99' : '0';
-// 途中表示は処理が重いので、スマートフォンでは既定で切る
-$('interimOn').checked = !isPhone;
+// 途中表示は既定で入れる（重い場合は画面右上のチェックで切れる）
+$('interimOn').checked = true;
 
 let wllama = null;
 
