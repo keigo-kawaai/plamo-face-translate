@@ -19,9 +19,9 @@
   /* 原文と日本語訳の組を、上から順に並べる */
   #feed { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 16px; }
   #feed:empty::before { content: "🎤 を押すと聞き取りを始めます。原文と日本語訳がここに並びます。"; color: #aaa; font-size: 15px; }
-  .item { padding: 8px 0; border-bottom: 1px solid #eee; }
-  .item .orig { font-size: 14px; line-height: 1.4; color: var(--muted); word-break: break-word; }
-  .item .ja { font-size: 20px; line-height: 1.45; margin-top: 2px; word-break: break-word; }
+  .item { padding: 6px 0; border-bottom: 1px solid #eee; }
+  .item .orig { font-size: 12px; line-height: 1.4; color: var(--muted); word-break: break-word; }
+  .item .ja { font-size: 16px; line-height: 1.45; margin-top: 2px; word-break: break-word; }
   .item .ja.pending { color: #aaa; }
   .item.interim .orig { color: #aaa; font-style: italic; }
 
@@ -240,7 +240,8 @@ function buildPrompt(text, from) {
 }
 
 // 翻訳の中核。訳文が伸びるたびに onText を呼び、最後に所要時間の説明を返す。
-async function runTranslation(text, from, onText) {
+// provisional=true は話の途中の仮訳。履歴には残さず、signal で中断できる。
+async function runTranslation(text, from, onText, { provisional = false, signal } = {}) {
   const t0 = performance.now();
   let first = 0;
   let acc = '';
@@ -251,6 +252,7 @@ async function runTranslation(text, from, onText) {
     temperature: 0,
     stop: ['<|plamo:tag|>', '<|plamo:bos|>'],
     stream: true,
+    abortSignal: signal,
     onData: (chunk) => {
       if (!first) first = performance.now();
       acc += chunk.choices?.[0]?.text ?? '';
@@ -259,7 +261,7 @@ async function runTranslation(text, from, onText) {
     },
   });
   const ja = acc.trim();
-  if (ja) {
+  if (ja && !provisional) {
     history.push({ from, src: text, ja });
     if (history.length > HISTORY_PAIRS) history.shift();
   }
@@ -385,7 +387,9 @@ async function decodeTo16k(arrayBuffer) {
 // 無音で文を区切り、区切れた文から順に 認識 → 翻訳 して追記していく。
 // 話している最中は、認識途中の文字を薄い色で出す。
 const SILENCE_MS = 700;       // これだけ無音が続いたら文の終わりとみなす
-const MAX_SEGMENT_MS = 15000; // 区切りが無くても、この長さで一度確定する
+const LONG_SEGMENT_MS = 4000; // これより長く話が続いたら、短い息継ぎでも区切る
+const SHORT_SILENCE_MS = 250; // そのときに区切りとみなす無音の長さ
+const MAX_SEGMENT_MS = 9000;  // 息継ぎが無くても、この長さで一度確定する
 const MIN_SPEECH_MS = 300;    // これより短い音は雑音として捨てる
 const PREROLL_MS = 300;       // 話し始めの頭が欠けないよう、直前の音も含める
 const INTERIM_EVERY_MS = 1000;
@@ -462,7 +466,8 @@ function feed(L, chunk) {
   L.chunks.push(chunk);
   L.segMs += dt;
   if (loud) { L.silenceMs = 0; L.voicedMs += dt; } else L.silenceMs += dt;
-  if (L.silenceMs >= SILENCE_MS || L.segMs >= MAX_SEGMENT_MS) endSegment(L);
+  const pause = L.segMs >= LONG_SEGMENT_MS ? SHORT_SILENCE_MS : SILENCE_MS;
+  if (L.silenceMs >= pause || L.segMs >= MAX_SEGMENT_MS) endSegment(L);
   else maybeInterim(L);
 }
 
@@ -487,8 +492,8 @@ function endSegment(L) {
 // 話している途中の仮の認識（手が空いているときだけ）
 function maybeInterim(L) {
   if (!$('interimOn').checked) return;
-  // 確定待ちや翻訳が動いている間は、そちらを優先して途中表示は休む
-  if (L.asrBusy || L.finals.length || mtBusy || mtQueue.length) return;
+  // 確定待ちの認識があるときは、そちらを優先する
+  if (L.asrBusy || L.finals.length) return;
   if (L.segMs < 1200 || performance.now() - L.lastInterim < INTERIM_EVERY_MS) return;
   L.lastInterim = performance.now();
   const segId = L.segId;
@@ -505,9 +510,36 @@ function maybeInterim(L) {
         L.interim.orig.textContent = t;
       }
       scrollEnd();
+      maybeProvisional(L);
     })
     .catch((e) => logLine('ERROR', [e]))
     .finally(() => { L.asrBusy = false; pumpAsr(L); });
+}
+
+// 話している途中の文を仮に訳して、薄い色で出す。
+// 確定文の翻訳が待っているときは行わない。確定したら正式な訳で置き換わる。
+let provAbort = null;
+async function maybeProvisional(L) {
+  const row = L.interim;
+  if (!row || mtBusy || mtQueue.length) return;
+  const text = row.orig.textContent;
+  if (!text || text === row.provText) return;
+  row.provText = text;
+  mtBusy = true;
+  provAbort = new AbortController();
+  try {
+    await runTranslation(text, L.from, (t) => {
+      if (row.ja.classList.contains('pending')) row.ja.textContent = t;
+      scrollEnd();
+    }, { provisional: true, signal: provAbort.signal });
+  } catch (e) {
+    if (e?.name !== 'AbortError') logLine('ERROR', [e]);
+  } finally {
+    provAbort = null;
+    mtBusy = false;
+    pumpMt();
+    if (L.interim === row) maybeProvisional(L);
+  }
 }
 
 // 音が無いところで Whisper が出しがちな注記（[音楽] など）を取り除く
@@ -529,6 +561,7 @@ async function pumpAsr(L) {
       row.item.classList.remove('interim');
       row.orig.textContent = text;
       scrollEnd();
+      provAbort?.abort(); // 仮訳が動いていたら止めて、確定文の翻訳を先に通す
       mtQueue.push({ text, from: L.from, row });
       pumpMt();
     }
