@@ -8,6 +8,9 @@ env.backends.onnx.wasm.wasmPaths = {
   wasm: new URL('./vendor/transformers/ort-wasm-simd-threaded.wasm', import.meta.url).href,
 };
 
+// 翻訳モデルと CPU を取り合わないよう、スレッド数を抑える
+env.backends.onnx.wasm.numThreads = 2;
+
 let asr = null;
 let isWhisper = true;
 

@@ -38,8 +38,8 @@
   .controls #clear { border: 1px solid var(--line); background: #fff; border-radius: 10px; font-size: 13px; padding: 8px 10px; color: var(--muted); }
   .mic { width: 56px; height: 56px; border-radius: 50%; border: 0; background: var(--green); color: #fff; font-size: 24px; flex: none; }
   .mic:disabled { background: #b5b5b5; }
-  .mic.rec { background: #d1242f; animation: pulse 1s infinite; }
-  @keyframes pulse { 50% { opacity: .55; } }
+  /* 点滅させない。描画が続くと GPU での翻訳が遅くなるため、赤く点灯するだけにする */
+  .mic.rec { background: #d1242f; }
 </style>
 </head>
 <body>
@@ -58,8 +58,8 @@
   <select id="asrModel" title="音声認識">
     <option value="">音声なし</option>
     <option value="onnx-community/moonshine-tiny-ONNX">英語専用・高速 tiny (28MB)</option>
-    <option value="onnx-community/moonshine-base-ONNX">英語専用・高速 base</option>
-    <option value="onnx-community/whisper-tiny" selected>音声 tiny (41MB)</option>
+    <option value="onnx-community/moonshine-base-ONNX" selected>英語専用・高速 base</option>
+    <option value="onnx-community/whisper-tiny">音声 tiny (41MB)</option>
     <option value="onnx-community/whisper-base">音声 base (77MB)</option>
     <option value="onnx-community/whisper-small">音声 small (249MB)</option>
   </select>
@@ -120,7 +120,10 @@ const LANGS = [
   ['nl', 'オランダ語', 'nl'], ['ar', 'アラビア語', 'ar'], ['hi', 'ヒンディー語', 'hi'],
   ['auto', '自動判定', null],
 ];
-const HISTORY_PAIRS = 3; // 直前の対訳を何組まで文脈として渡すか
+// 直前の対訳を文脈として渡す。毎回 1 組ずつ入れ替えると、モデルが前回の計算を
+// 使い回せず遅くなるので、MAX 組まで足し続けてから KEEP 組に減らす。
+const HISTORY_MAX = 8;
+const HISTORY_KEEP = 2;
 
 const $ = (id) => document.getElementById(id);
 const status = (s) => { $('status').textContent = s; };
@@ -185,6 +188,9 @@ $('load').onclick = async () => {
       {
         n_ctx: 2048,
         n_gpu_layers: Number($('gpu').value),
+        // 音声認識と CPU を取り合わないよう、スレッド数を抑える
+        // （GPU 実行時は CPU 側の仕事が少ないので 2 で足りる）
+        n_threads: Number($('gpu').value) > 0 ? 2 : Math.max(2, Math.min(4, (navigator.hardwareConcurrency || 4) - 2)),
         progressCallback: ({ loaded, total }) => {
           const p = total ? loaded / total : 0;
           $('bar').style.width = `${(p * 100).toFixed(1)}%`;
@@ -250,7 +256,7 @@ async function runTranslation(text, from, onText, { provisional = false } = {}) 
   let last = null;
   await wllama.createCompletion({
     prompt: buildPrompt(text, from),
-    max_tokens: provisional ? 96 : 512,
+    max_tokens: provisional ? 64 : 512,
     temperature: 0,
     stop: ['<|plamo:tag|>', '<|plamo:bos|>'],
     stream: true,
@@ -264,11 +270,12 @@ async function runTranslation(text, from, onText, { provisional = false } = {}) 
   const ja = acc.trim();
   if (ja && !provisional) {
     history.push({ from, src: text, ja });
-    if (history.length > HISTORY_PAIRS) history.shift();
+    if (history.length > HISTORY_MAX) history = history.slice(-HISTORY_KEEP);
   }
   const total = (performance.now() - t0) / 1000;
   const ttft = first ? (first - t0) / 1000 : total;
   const tps = last?.timings?.predicted_per_second;
+  logLine('log', [`${provisional ? '仮訳' : '翻訳'} ${total.toFixed(1)}秒 最初まで${ttft.toFixed(1)}秒 ${tps ? tps.toFixed(0) : '?'}トークン/秒 入力${last?.timings?.prompt_n ?? '?'}(再利用${last?.timings?.cache_n ?? '?'}) 出力${last?.timings?.predicted_n ?? '?'}`]);
   return `翻訳 ${total.toFixed(1)}秒（最初の文字まで ${ttft.toFixed(1)}秒${tps ? `、${tps.toFixed(1)} トークン/秒` : ''}）`;
 }
 
@@ -297,12 +304,14 @@ $('clear').onclick = () => {
 
 // 翻訳待ちの列。聞き取りと文字入力のどちらからも、ここに積んで順に訳す。
 const mtQueue = [];
-let mtBusy = false;
+let mtBusy = false;       // 翻訳モデルが動いている（仮訳を含む）
+let finalMtBusy = false;  // 確定文の翻訳が動いている
 let lastMsg = '';
 
 async function pumpMt() {
   if (mtBusy || !mtQueue.length) return;
   mtBusy = true;
+  finalMtBusy = true;
   const { text, from, row } = mtQueue.shift();
   const show = (t) => {
     row.ja.className = 'ja';
@@ -326,6 +335,7 @@ async function pumpMt() {
     lastMsg = `翻訳失敗: ${String(e?.message || e).slice(0, 80)}`;
   } finally {
     mtBusy = false;
+    finalMtBusy = false;
     showStatus();
     pumpMt();
   }
@@ -350,6 +360,7 @@ $('text').addEventListener('keydown', (ev) => {
 
 // ---------- 音声認識（Whisper） ----------
 let asrWorker = null;
+let loadedAsr = ''; // 読み込み済みの音声認識モデル名
 let asrReady = false;
 let asrSeq = 0;
 const asrPending = new Map();
@@ -362,7 +373,7 @@ function loadAsr(model, onProgress) {
     asrWorker.onerror = (e) => reject(new Error(e.message || '音声認識の起動に失敗'));
     asrWorker.onmessage = ({ data }) => {
       if (data.type === 'progress') onProgress(data);
-      else if (data.type === 'ready') { asrReady = true; resolve(); }
+      else if (data.type === 'ready') { asrReady = true; loadedAsr = model; resolve(); }
       else if (data.type === 'result') { asrPending.get(data.id)?.resolve(data.text); asrPending.delete(data.id); }
       else if (data.type === 'error') {
         const p = asrPending.get(data.id);
@@ -401,9 +412,11 @@ const SILENCE_MS = 500;       // これだけ無音が続いたら文の終わ�
 const LONG_SEGMENT_MS = 4000; // これより長く話が続いたら、短い息継ぎでも区切る
 const SHORT_SILENCE_MS = 250; // そのときに区切りとみなす無音の長さ
 const MAX_SEGMENT_MS = 9000;  // 息継ぎが無くても、この長さで一度確定する
-const MIN_SPEECH_MS = 300;    // これより短い音は雑音として捨てる
+const MIN_SPEECH_MS = 200;    // これより短い音は雑音として捨てる
+const OVERLAP_MS = 150;       // 長さで強制的に区切ったとき、次の文に重ねて持ち越す長さ
 const PREROLL_MS = 300;       // 話し始めの頭が欠けないよう、直前の音も含める
-const INTERIM_EVERY_MS = 1000;
+const INTERIM_EVERY_MS = 700;  // 途中の認識を終えてから、次を始めるまでに空ける時間
+const PROVISIONAL_EVERY_MS = 1500; // 仮訳を始める間隔の下限
 
 let live = null; // 聞き取り中の状態
 
@@ -439,10 +452,18 @@ function newLive(rate) {
     interim: null, // 話している途中の仮の行
     // 区切り検出
     inSpeech: false, chunks: [], pre: [], preMs: 0, loudMs: 0, silenceMs: 0, segMs: 0, voicedMs: 0,
-    noise: 0.004, segId: 0, lastInterim: 0,
+    noise: 0.003, segId: 0, lastInterim: 0,
     // 認識待ち
     finals: [], asrBusy: false,
   };
+}
+
+// 声を拾っている間だけ、画面上部の細い線を点ける。
+// 注意: 聞き取り中に画面を描き続ける表現（音量メーター、点滅など）は入れないこと。
+// 描画が続くと GPU での翻訳が約 1/10 の速さに落ちる（PC で確認）。
+function voiceLamp(on) {
+  $('bar').style.transition = 'none';
+  $('bar').style.width = on ? '100%' : '0';
 }
 
 // マイクから届いた波形を 1 かたまりずつ受け取る
@@ -452,16 +473,19 @@ function feed(L, chunk) {
   let sum = 0;
   for (let i = 0; i < chunk.length; i++) sum += chunk[i] * chunk[i];
   const rms = Math.sqrt(sum / chunk.length);
-  const loud = rms > Math.max(0.012, L.noise * 3);
+  const loud = rms > Math.max(0.006, L.noise * 2.5);
 
   if (!L.inSpeech) {
-    L.noise = Math.min(0.05, L.noise * 0.97 + rms * 0.03);
+    // 周囲の雑音の大きさを見積もる。静かになったらすぐ下げ、大きい音ではゆっくりしか上げない
+    // （声そのものを雑音と見なしてしまわないため）。
+    L.noise = rms < L.noise ? L.noise * 0.9 + rms * 0.1 : Math.min(0.03, L.noise * 0.995 + rms * 0.005);
     L.pre.push(chunk);
     L.preMs += dt;
     while (L.preMs > PREROLL_MS && L.pre.length > 1) L.preMs -= L.pre.shift().length / L.rate * 1000;
     L.loudMs = loud ? L.loudMs + dt : 0;
     if (L.loudMs >= 60) {
       L.inSpeech = true;
+      voiceLamp(true);
       L.chunks = L.pre;
       L.pre = [];
       L.segMs = L.preMs;
@@ -478,16 +502,35 @@ function feed(L, chunk) {
   L.segMs += dt;
   if (loud) { L.silenceMs = 0; L.voicedMs += dt; } else L.silenceMs += dt;
   const pause = L.segMs >= LONG_SEGMENT_MS ? SHORT_SILENCE_MS : SILENCE_MS;
-  if (L.silenceMs >= pause || L.segMs >= MAX_SEGMENT_MS) endSegment(L);
+  if (L.silenceMs >= pause) endSegment(L);
+  else if (L.segMs >= MAX_SEGMENT_MS) endSegment(L, true);
   else maybeInterim(L);
 }
 
 // 文の区切り。確定用の認識待ちに積む。途中表示の行があれば、それを確定行として使い回す。
-function endSegment(L) {
+// forced=true は、話が途切れないまま長さの上限で区切った場合。
+function endSegment(L, forced = false) {
   if (!L.inSpeech) return;
   const audio = L.voicedMs >= MIN_SPEECH_MS ? resampleTo16k(concat(L.chunks), L.rate) : null;
-  L.inSpeech = false;
-  L.chunks = [];
+  if (!audio) logLine('log', [`短すぎる音を無視（${L.voicedMs.toFixed(0)}ms）`]);
+  if (forced) {
+    // 話は続いているので、末尾を少し重ねたまま次の文としてすぐ録り始める
+    const tail = [];
+    let ms = 0;
+    for (let i = L.chunks.length - 1; i >= 0 && ms < OVERLAP_MS; i--) {
+      tail.unshift(L.chunks[i]);
+      ms += L.chunks[i].length / L.rate * 1000;
+    }
+    L.chunks = tail;
+    L.segMs = ms;
+    L.voicedMs = ms;
+    L.silenceMs = 0;
+    L.lastInterim = performance.now();
+  } else {
+    L.inSpeech = false;
+    L.chunks = [];
+    voiceLamp(false);
+  }
   L.segId++;
   const row = L.interim;
   L.interim = null;
@@ -503,10 +546,10 @@ function endSegment(L) {
 // 話している途中の仮の認識（手が空いているときだけ）
 function maybeInterim(L) {
   if (!$('interimOn').checked) return;
-  // 確定待ちの認識があるときは、そちらを優先する
-  if (L.asrBusy || L.finals.length) return;
+  // 確定文の認識・翻訳が動いているときは、そちらを優先して休む
+  // （同時に動かすと処理を取り合い、確定文の翻訳が極端に遅くなる）
+  if (L.asrBusy || L.finals.length || finalMtBusy || mtQueue.length) return;
   if (L.segMs < 1200 || performance.now() - L.lastInterim < INTERIM_EVERY_MS) return;
-  L.lastInterim = performance.now();
   const segId = L.segId;
   const audio = resampleTo16k(concat(L.chunks), L.rate);
   L.asrBusy = true;
@@ -524,17 +567,20 @@ function maybeInterim(L) {
       maybeProvisional(L);
     })
     .catch((e) => logLine('ERROR', [e]))
-    .finally(() => { L.asrBusy = false; pumpAsr(L); });
+    .finally(() => { L.asrBusy = false; L.lastInterim = performance.now(); pumpAsr(L); });
 }
 
 // 話している途中の文を仮に訳して、薄い色で出す。
 // 確定文の翻訳が待っているときは行わない。確定したら正式な訳で置き換わる。
+let lastProvisional = 0;
 async function maybeProvisional(L) {
   const row = L.interim;
-  if (!row || mtBusy || mtQueue.length) return;
+  if (!row || mtBusy || mtQueue.length || L.finals.length) return;
+  if (performance.now() - lastProvisional < PROVISIONAL_EVERY_MS) return;
   const text = row.orig.textContent;
   if (!text || text === row.provText) return;
   row.provText = text;
+  lastProvisional = performance.now();
   mtBusy = true;
   try {
     await runTranslation(text, L.from, (t) => {
@@ -546,7 +592,6 @@ async function maybeProvisional(L) {
   } finally {
     mtBusy = false;
     pumpMt();
-    if (L.interim === row) maybeProvisional(L);
   }
 }
 
@@ -563,7 +608,9 @@ async function pumpAsr(L) {
     const t0 = performance.now();
     const text = cleanAsr(await transcribe(audio, L.asrLang));
     lastMsg = `認識 ${((performance.now() - t0) / 1000).toFixed(1)}秒`;
+    logLine('log', [`${lastMsg}（音声 ${(audio.length / 16000).toFixed(1)}秒、認識待ち ${L.finals.length}）`]);
     if (!text) {
+      logLine('log', [`認識結果が空（音声 ${(audio.length / 16000).toFixed(1)}秒）`]);
       row.item.remove();
     } else {
       row.item.classList.remove('interim');
@@ -611,10 +658,16 @@ async function toggleMic() {
     if (!live.stopped) stopLive();
     return;
   }
+  if (loadedAsr.includes('moonshine') && $('from').value !== 'en') {
+    status('いまの音声認識は英語専用です。他の言語を聞くときは、右上で「音声 tiny / base / small」を選んで読み込み直してください。');
+    return;
+  }
   let stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      // 通話用の雑音除去・エコー除去は、スピーカーの音や離れた人の声を「雑音」として
+      // 削ってしまうので切る。小さい音を拾えるよう、音量の自動調整だけ入れる。
+      audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: true },
     });
   } catch (e) {
     status(`マイクを使えません: ${e?.message || e}`);
@@ -653,6 +706,7 @@ function stopLive() {
   L.ctx?.close();
   $('mic').classList.remove('rec');
   $('mic').disabled = true;
+  voiceLamp(false);
   $('from').disabled = false;
   keepAwake(false);
   showStatus();
