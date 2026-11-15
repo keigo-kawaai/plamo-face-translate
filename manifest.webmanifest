@@ -1,0 +1,10 @@
+{
+  "name": "対面翻訳（試作）",
+  "short_name": "対面翻訳",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#1a7f37",
+  "lang": "ja"
+}
