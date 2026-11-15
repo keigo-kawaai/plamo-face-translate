@@ -66,10 +66,15 @@
 </div>
 
 <script type="module">
-// 動作確認用: URL に ?compat=1 を付けると、PC でも Safari 向けの互換ビルドで動かす
-if (new URLSearchParams(location.search).has('compat')) {
-  try { delete WebAssembly.Suspending; } catch {}
-}
+// 互換ビルドが必要かを自前で判定する。
+// ライブラリ側の判定は iPhone の Safari で「Memory64 対応」と誤判定するため、
+// 実際に Memory64 を使う最小の wasm が通るかで確かめる。
+const MEM64_PROBE = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 5, 3, 1, 4, 1]);
+const hasMem64 = (() => { try { return WebAssembly.validate(MEM64_PROBE); } catch { return false; } })();
+const hasJspi = !!WebAssembly.Suspending;
+// URL に ?compat=1 を付けると、PC でも互換ビルドで動かせる（動作確認用）
+const forceCompat = new URLSearchParams(location.search).has('compat') || !hasMem64 || !hasJspi;
+globalThis.__WLLAMA_FORCE_COMPAT = forceCompat;
 const { Wllama } = await import('./vendor/wllama/index.js');
 
 // Service Worker を登録する（マルチスレッド有効化とオフライン起動のため）。
@@ -99,7 +104,9 @@ const logLine = (level, args) => {
   $('log').textContent += `[${new Date().toLocaleTimeString()}] ${level} ${t.slice(0, 300)}
 `;
   $('log').scrollTop = $('log').scrollHeight;
+  if (t.includes('Aborted(') && onAbort) onAbort(t);
 };
+let onAbort = null;
 const logger = {
   debug: (...a) => logLine('debug', a),
   log: (...a) => logLine('log', a),
@@ -109,7 +116,7 @@ const logger = {
 addEventListener('error', (e) => logLine('ERROR', [e.message]));
 addEventListener('unhandledrejection', (e) => logLine('ERROR', [e.reason]));
 logLine('log', [`UA: ${navigator.userAgent}`]);
-logLine('log', [`isolated=${self.crossOriginIsolated} webgpu=${!!navigator.gpu} jspi=${!!WebAssembly.Suspending} cores=${navigator.hardwareConcurrency} mem=${navigator.deviceMemory ?? '?'}GB`]);
+logLine('log', [`isolated=${self.crossOriginIsolated} webgpu=${!!navigator.gpu} jspi=${hasJspi} mem64=${hasMem64} compat=${forceCompat} cores=${navigator.hardwareConcurrency} mem=${navigator.deviceMemory ?? '?'}GB`]);
 
 for (const sel of [$('from'), $('to')]) {
   for (const [code, name] of LANGS) sel.add(new Option(name, code));
@@ -141,6 +148,12 @@ $('load').onclick = async () => {
       worker: './vendor/wllama-compat/wllama.js',
     });
     let stage = 'モデルを取得中…';
+    onAbort = (t) => {
+      stage = '';
+      clearInterval(timer);
+      status(`読み込み失敗（内部エラー）: ${t.slice(0, 120)}`);
+      $('load').disabled = false;
+    };
     timer = setInterval(() => {
       if (stage) status(`${stage} 経過 ${((performance.now() - t0) / 1000).toFixed(0)}秒`);
     }, 1000);

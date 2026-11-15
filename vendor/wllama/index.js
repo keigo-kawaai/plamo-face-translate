@@ -1413,7 +1413,8 @@ var cbToAsyncIter = (fn) => (...args) => {
   }();
 };
 var canUseAsyncFileRead = (compat) => isSupportJSPI() || compat;
-var needCompat = () => !isSupportJSPI() || !isSupportMem64();
+// patched: allow the page to force compat mode (Safari mis-detects Memory64 support)
+var needCompat = () => !!globalThis.__WLLAMA_FORCE_COMPAT || !isSupportJSPI() || !isSupportMem64();
 
 // src/workers-code/generated.ts
 var LIBLLAMA_VERSION = "b12211-7d7f028";
