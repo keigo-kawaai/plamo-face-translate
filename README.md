@@ -12,6 +12,8 @@
 - 翻訳モデル: [pfnet/plamo-3-translate-0.8b-GGUF](https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF)
   - このリポジトリにモデルは含まれません。利用時に各端末が直接取得します。
   - モデルの利用には PLaMo Community License が適用されます。条件はモデルカードを確認してください。
+- 音声認識モデル: [onnx-community/whisper-tiny / base / small](https://huggingface.co/onnx-community)（選んだものを利用時に取得）
+- 音声認識ライブラリ: [Transformers.js](https://github.com/huggingface/transformers.js) 4.3.2（Apache-2.0）と ONNX Runtime Web（MIT）を `vendor/transformers/` に同梱
 - 実行ライブラリ: [wllama](https://github.com/ngxson/wllama) 3.13.0（MIT License、`vendor/wllama/` に同梱。Safari 向け互換ビルドは `vendor/wllama-compat/`）
 
 ## ローカルで動かす

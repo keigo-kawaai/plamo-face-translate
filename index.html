@@ -11,7 +11,7 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; font-family: -apple-system, "Hiragino Sans", "Yu Gothic UI", sans-serif; background: #fff; color: #111; }
   body { display: flex; flex-direction: column; height: 100dvh; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
-  header { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: #f1f1f1; font-size: 13px; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 12px; background: #f1f1f1; font-size: 13px; }
   header b { flex: 1; }
   header select, header button { font-size: 13px; padding: 4px 6px; }
   .pane { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 18px; font-size: 26px; line-height: 1.35; white-space: pre-wrap; word-break: break-word; }
@@ -26,9 +26,13 @@
   textarea { flex: 1; font: inherit; font-size: 17px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; resize: none; height: 46px; }
   form button { border: 0; background: var(--green); color: #fff; font-size: 16px; padding: 0 16px; border-radius: 10px; }
   form button:disabled { background: #b5b5b5; }
-  .langs { display: flex; align-items: center; gap: 8px; padding: 0 12px 8px; }
-  .langs select { flex: 1; font-size: 16px; padding: 8px; border-radius: 10px; border: 1px solid var(--line); background: #f6f6f6; }
+  .langs { display: flex; align-items: center; gap: 6px; padding: 0 12px 8px; }
+  .langs select { flex: 1; min-width: 0; font-size: 16px; padding: 8px; border-radius: 10px; border: 1px solid var(--line); background: #f6f6f6; }
   .langs button { border: 0; background: none; font-size: 20px; }
+  .langs .mic { width: 46px; height: 46px; border-radius: 50%; background: var(--green); color: #fff; font-size: 20px; flex: none; }
+  .langs .mic:disabled { background: #b5b5b5; }
+  .langs .mic.rec { background: #d1242f; animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .55; } }
 </style>
 </head>
 <body>
@@ -44,12 +48,18 @@
     <option value="0">CPU</option>
     <option value="99">GPU</option>
   </select>
+  <select id="asrModel" title="音声認識">
+    <option value="">音声なし</option>
+    <option value="onnx-community/whisper-tiny">音声 tiny (41MB)</option>
+    <option value="onnx-community/whisper-base" selected>音声 base (77MB)</option>
+    <option value="onnx-community/whisper-small">音声 small (249MB)</option>
+  </select>
   <button id="load">読み込む</button>
 </header>
 <div id="bar"></div>
 
-<div class="pane them" id="out" data-placeholder="翻訳がここに出ます（相手向き）"></div>
-<div class="pane" id="src" data-placeholder="入力した文がここに出ます"></div>
+<div class="pane them" id="out" data-placeholder="相手向きの表示"></div>
+<div class="pane" id="src" data-placeholder="自分向きの表示"></div>
 
 <div id="status">モデル未読み込み。「読み込む」を押してください（初回のみ通信が必要です）。</div>
 
@@ -60,9 +70,11 @@
   <button id="go" disabled>翻訳</button>
 </form>
 <div class="langs">
-  <select id="from"></select>
+  <button id="micMe" class="mic" type="button" disabled aria-label="自分が話す">🎤</button>
+  <select id="from" title="自分の言語"></select>
   <button id="swap" type="button" aria-label="入れ替え">⇄</button>
-  <select id="to"></select>
+  <select id="to" title="相手の言語"></select>
+  <button id="micThem" class="mic" type="button" disabled aria-label="相手が話す">🎤</button>
 </div>
 
 <script type="module">
@@ -134,6 +146,7 @@ let wllama = null;
 $('load').onclick = async () => {
   $('load').disabled = true;
   $('go').disabled = true;
+  setMics(false);
   const t0 = performance.now();
   let timer = 0;
   try {
@@ -171,11 +184,27 @@ $('load').onclick = async () => {
         },
       },
     );
+    $('go').disabled = false;
+    const llmSec = ((performance.now() - t0) / 1000).toFixed(1);
+    let asrMsg = '音声なし';
+    if ($('asrModel').value) {
+      const t1 = performance.now();
+      stage = '音声認識モデルを取得中…';
+      try {
+        await loadAsr($('asrModel').value, ({ loaded, total }) => {
+          $('bar').style.width = `${((loaded / total) * 100).toFixed(1)}%`;
+          stage = `音声認識モデルを取得中… ${(loaded / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB`;
+        });
+        asrMsg = `音声 ${((performance.now() - t1) / 1000).toFixed(1)}秒`;
+      } catch (e) {
+        logLine('ERROR', [e]);
+        asrMsg = `音声認識は読み込み失敗（${e?.message || e}）`;
+      }
+    }
     clearInterval(timer);
     $('bar').style.width = '0';
-    const sec = ((performance.now() - t0) / 1000).toFixed(1);
-    status(`読み込み完了 ${sec}秒 / ${$('gpu').value === '0' ? 'CPU' : 'GPU'} / マルチスレッド: ${wllama.isMultithread() ? 'あり' : 'なし'}`);
-    $('go').disabled = false;
+    setMics(true);
+    status(`読み込み完了: 翻訳 ${llmSec}秒 / ${asrMsg} / ${$('gpu').value === '0' ? 'CPU' : 'GPU'} / マルチスレッド: ${wllama.isMultithread() ? 'あり' : 'なし'}`);
   } catch (e) {
     clearInterval(timer);
     logLine('ERROR', [e]);
@@ -192,21 +221,23 @@ function buildPrompt(text, from, to) {
     + `<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>${to}<|plamo:msg|>`;
 }
 
-$('form').onsubmit = async (ev) => {
-  ev.preventDefault();
-  const text = $('text').value.trim();
+// 翻訳して表示する。speaker='me' なら原文を下（自分向き）、訳を上（相手向き）に出す。
+// speaker='them' ならその逆。
+async function translate(text, from, to, speaker) {
   if (!text || !wllama) return;
+  const srcPane = speaker === 'me' ? $('src') : $('out');
+  const outPane = speaker === 'me' ? $('out') : $('src');
   $('go').disabled = true;
-  $('src').textContent = text;
-  $('out').textContent = '';
-  $('out').classList.add('busy');
+  srcPane.textContent = text;
+  outPane.textContent = '';
+  outPane.classList.add('busy');
   const t0 = performance.now();
   let first = 0;
   let acc = '';
   let last = null;
   try {
     await wllama.createCompletion({
-      prompt: buildPrompt(text, $('from').value, $('to').value),
+      prompt: buildPrompt(text, from, to),
       max_tokens: 512,
       temperature: 0,
       stop: ['<|plamo:tag|>', '<|plamo:bos|>'],
@@ -214,22 +245,139 @@ $('form').onsubmit = async (ev) => {
       onData: (chunk) => {
         if (!first) first = performance.now();
         acc += chunk.choices?.[0]?.text ?? '';
-        $('out').textContent = acc;
+        outPane.textContent = acc;
         last = chunk;
       },
     });
     const total = (performance.now() - t0) / 1000;
     const ttft = first ? (first - t0) / 1000 : total;
     const tps = last?.timings?.predicted_per_second;
-    status(`翻訳 ${total.toFixed(1)}秒（最初の文字まで ${ttft.toFixed(1)}秒${tps ? `、${tps.toFixed(1)} トークン/秒` : ''}）`);
-    $('text').value = '';
+    return `翻訳 ${total.toFixed(1)}秒（最初の文字まで ${ttft.toFixed(1)}秒${tps ? `、${tps.toFixed(1)} トークン/秒` : ''}）`;
   } catch (e) {
     logLine('ERROR', [e]);
-    status(`翻訳失敗: ${e?.message || e}`);
+    return `翻訳失敗: ${e?.message || e}`;
   } finally {
-    $('out').classList.remove('busy');
+    outPane.classList.remove('busy');
     $('go').disabled = false;
   }
+}
+
+$('form').onsubmit = async (ev) => {
+  ev.preventDefault();
+  const text = $('text').value.trim();
+  if (!text || !wllama) return;
+  $('text').value = '';
+  status(await translate(text, $('from').value, $('to').value, 'me'));
+};
+
+// ---------- 音声認識（Whisper） ----------
+let asrWorker = null;
+let asrReady = false;
+let asrSeq = 0;
+const asrPending = new Map();
+
+function loadAsr(model, onProgress) {
+  asrReady = false;
+  if (asrWorker) asrWorker.terminate();
+  asrWorker = new Worker('./asr-worker.js', { type: 'module' });
+  return new Promise((resolve, reject) => {
+    asrWorker.onerror = (e) => reject(new Error(e.message || '音声認識の起動に失敗'));
+    asrWorker.onmessage = ({ data }) => {
+      if (data.type === 'progress') onProgress(data);
+      else if (data.type === 'ready') { asrReady = true; resolve(); }
+      else if (data.type === 'result') { asrPending.get(data.id)?.resolve(data.text); asrPending.delete(data.id); }
+      else if (data.type === 'error') {
+        const p = asrPending.get(data.id);
+        if (p) { p.reject(new Error(data.message)); asrPending.delete(data.id); }
+        else reject(new Error(data.message));
+      }
+    };
+    asrWorker.postMessage({ type: 'load', model });
+  });
+}
+
+function transcribe(audio, lang) {
+  const id = ++asrSeq;
+  return new Promise((resolve, reject) => {
+    asrPending.set(id, { resolve, reject });
+    // Whisper は簡体字・繁体字を区別しないので zh にまとめる
+    asrWorker.postMessage({ type: 'run', id, audio, language: lang.startsWith('zh') ? 'zh' : lang });
+  });
+}
+
+// 録音データ（または音声ファイル）を 16kHz・モノラルの波形に変換する
+async function decodeTo16k(arrayBuffer) {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+  try {
+    const buf = await ctx.decodeAudioData(arrayBuffer);
+    return buf.getChannelData(0).slice();
+  } finally {
+    ctx.close();
+  }
+}
+
+let rec = null; // 録音中の状態
+
+async function toggleMic(speaker) {
+  const btn = speaker === 'me' ? $('micMe') : $('micThem');
+  if (rec) {
+    if (rec.speaker === speaker) rec.recorder.stop();
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    status(`マイクを使えません: ${e?.message || e}`);
+    return;
+  }
+  const chunks = [];
+  const recorder = new MediaRecorder(stream);
+  rec = { speaker, recorder };
+  btn.classList.add('rec');
+  status('録音中… もう一度押すと止まります');
+  recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+  recorder.onstop = async () => {
+    stream.getTracks().forEach((t) => t.stop());
+    btn.classList.remove('rec');
+    rec = null;
+    setMics(false);
+    try {
+      const t0 = performance.now();
+      status('音声を認識中…');
+      const blob = new Blob(chunks, { type: recorder.mimeType });
+      const audio = await decodeTo16k(await blob.arrayBuffer());
+      const from = speaker === 'me' ? $('from').value : $('to').value;
+      const to = speaker === 'me' ? $('to').value : $('from').value;
+      const text = await transcribe(audio, from);
+      const asrSec = ((performance.now() - t0) / 1000).toFixed(1);
+      if (!text) { status(`音声を認識できませんでした（${asrSec}秒）`); return; }
+      const msg = await translate(text, from, to, speaker);
+      status(`認識 ${asrSec}秒（音声 ${(audio.length / 16000).toFixed(1)}秒） / ${msg}`);
+    } catch (e) {
+      logLine('ERROR', [e]);
+      status(`音声認識失敗: ${e?.message || e}`);
+    } finally {
+      setMics(true);
+    }
+  };
+  recorder.start();
+}
+
+function setMics(enabled) {
+  const ok = enabled && asrReady && !!wllama;
+  $('micMe').disabled = !ok;
+  $('micThem').disabled = !ok;
+}
+$('micMe').onclick = () => toggleMic('me');
+$('micThem').onclick = () => toggleMic('them');
+
+// 動作確認用: 音声ファイルの URL を渡して認識だけ試す
+window.__asrTest = async (url, lang) => {
+  const audio = await decodeTo16k(await (await fetch(url)).arrayBuffer());
+  const t0 = performance.now();
+  const text = await transcribe(audio, lang);
+  return { text, sec: (performance.now() - t0) / 1000, audioSec: audio.length / 16000 };
 };
 
 $('text').addEventListener('keydown', (ev) => {
