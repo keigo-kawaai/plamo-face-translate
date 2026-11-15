@@ -140,9 +140,9 @@ $('from').value = 'ja';
 $('to').value = 'en';
 $('swap').onclick = () => { [$('from').value, $('to').value] = [$('to').value, $('from').value]; };
 
-// iPhone では既定で CPU、PC では GPU を初期値にする
+// WebGPU が使える端末では GPU を初期値にする（iPhone 実機で CPU の約 8 倍速を確認）
 const isPhone = /iPhone|iPad|Android/.test(navigator.userAgent);
-$('gpu').value = !isPhone && navigator.gpu ? '99' : '0';
+$('gpu').value = navigator.gpu ? '99' : '0';
 // 途中表示は処理が重いので、スマートフォンでは既定で切る
 $('interimOn').checked = !isPhone;
 
